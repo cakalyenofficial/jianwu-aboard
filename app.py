@@ -64,15 +64,31 @@ def multi_line(df, x, ys, labels=None, title='', height=300):
     return fig
 
 def daily_kpis(df, cols=['销售额','毛利','订单数']):
-    """从每日数据 DataFrame 提取昨日 KPI + 环比"""
-    if df.empty or len(df) < 2:
+    """从每日数据 DataFrame 提取昨日 KPI + 环比（以机器日期昨日为准）"""
+    if df.empty:
         return {}
-    today = df.iloc[-1]; yesterday = df.iloc[-2]
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+    day_before = yesterday - timedelta(days=1)
+
+    df_yd = df[df['日期'] == yesterday]
+    if df_yd.empty:
+        # 昨天数据未更新，全部填充 0
+        result = {}
+        for c in cols:
+            if c in df.columns:
+                result[c] = (0, 0)
+        return result
+
+    cur_row = df_yd.iloc[0]
+    df_bd = df[df['日期'] == day_before]
+    prev_row = df_bd.iloc[0] if not df_bd.empty else None
+
     result = {}
     for c in cols:
         if c in df.columns:
-            cur = today[c] if not pd.isna(today[c]) else 0
-            prev = yesterday[c] if not pd.isna(yesterday[c]) else 1
+            cur = cur_row[c] if not pd.isna(cur_row[c]) else 0
+            prev = prev_row[c] if prev_row is not None and not pd.isna(prev_row[c]) else 0
             chg = (cur / prev - 1) * 100 if prev else 0
             result[c] = (cur, chg)
     return result
