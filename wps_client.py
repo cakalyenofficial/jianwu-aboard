@@ -7,22 +7,34 @@ GROUP_ID = 3055417161
 
 def _load_cookies():
     """加载认证凭据：优先 Streamlit secrets，其次本地 cookies.xlsx"""
+    import os
     try:
         import streamlit as st
-        csrf = st.secrets.get('WPS_CSRF', '')
-        if csrf:
+        required = ['WPS_SID', 'KSO_SID', 'WPS_CSRF', 'WPS_UID']
+        missing = [k for k in required if k not in st.secrets or not st.secrets[k]]
+        if not missing:
             return {
                 'wps_sid': st.secrets['WPS_SID'],
                 'kso_sid': st.secrets['KSO_SID'],
-                'csrf': csrf,
+                'csrf': st.secrets['WPS_CSRF'],
                 'uid': st.secrets['WPS_UID'],
                 'cv': st.secrets.get('WPS_CV', ''),
                 'env': st.secrets.get('WPS_ENV', 'prod-0'),
             }
+        if missing:
+            raise KeyError(f'Streamlit Cloud Secrets 缺失或为空: {", ".join(missing)}')
+    except KeyError:
+        raise
     except Exception:
         pass
 
     # Fallback: 本地 cookies.xlsx
+    if not os.path.exists('cookies.xlsx'):
+        raise FileNotFoundError(
+            'Streamlit Cloud Secrets 未配置，且本地 cookies.xlsx 不存在。'
+            '请在 Streamlit Cloud → Settings → Secrets 中添加: '
+            'WPS_SID / KSO_SID / WPS_CSRF / WPS_UID / WPS_CV / WPS_ENV'
+        )
     import openpyxl
     wb = openpyxl.load_workbook('cookies.xlsx')
     ws = wb['Sheet2']
