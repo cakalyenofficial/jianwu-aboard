@@ -11,7 +11,7 @@ _WPS_EPOCH = datetime(1899, 12, 30)
 # ============================================================
 # 缓存
 # ============================================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def _get_file_id_map():
     id_map = {}
     def walk(parentid=0):
@@ -22,7 +22,7 @@ def _get_file_id_map():
     walk()
     return id_map
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def _load_workbook(fname):
     fmap = _get_file_id_map()
     if fname not in fmap:

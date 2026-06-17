@@ -98,6 +98,23 @@ def daily_kpis(df, cols=['销售额','毛利','订单数']):
 # ============================================================
 st.sidebar.markdown('# 📊 南京建武 数据看板')
 st.sidebar.markdown('---')
+
+# 每日 10:00 自动刷新 + 手动刷新
+now = datetime.now()
+today_str = now.strftime('%Y%m%d')
+if 'last_auto_refresh' not in st.session_state:
+    st.session_state.last_auto_refresh = None
+
+if now.hour >= 10 and st.session_state.last_auto_refresh != today_str:
+    st.cache_data.clear()
+    st.session_state.last_auto_refresh = today_str
+    st.rerun()
+
+if st.sidebar.button('🔄 手动刷新数据', use_container_width=True):
+    st.cache_data.clear()
+    st.session_state.last_auto_refresh = None
+    st.rerun()
+
 layer = st.sidebar.radio('',
     ['🏢 公司层', '📦 单品层', '🛒 天猫', '🎵 抖音', '💰 拼多多', '📦 京东'],
     label_visibility='collapsed')
