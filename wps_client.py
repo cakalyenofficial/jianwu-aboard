@@ -1,12 +1,28 @@
 # -*- coding: utf-8 -*-
-"""WPS 云盘 API 客户端"""
+"""WPS 云盘 API 客户端 — 支持本地 cookies.xlsx 和 Streamlit Cloud secrets"""
 import urllib.request, ssl, json, io
 ssl._create_default_https_context = ssl._create_unverified_context
 
 GROUP_ID = 3055417161
 
 def _load_cookies():
-    """从 cookies.xlsx 加载认证凭据"""
+    """加载认证凭据：优先 Streamlit secrets，其次本地 cookies.xlsx"""
+    try:
+        import streamlit as st
+        csrf = st.secrets.get('WPS_CSRF', '')
+        if csrf:
+            return {
+                'wps_sid': st.secrets['WPS_SID'],
+                'kso_sid': st.secrets['KSO_SID'],
+                'csrf': csrf,
+                'uid': st.secrets['WPS_UID'],
+                'cv': st.secrets.get('WPS_CV', ''),
+                'env': st.secrets.get('WPS_ENV', 'prod-0'),
+            }
+    except Exception:
+        pass
+
+    # Fallback: 本地 cookies.xlsx
     import openpyxl
     wb = openpyxl.load_workbook('cookies.xlsx')
     ws = wb['Sheet2']
@@ -32,7 +48,6 @@ def _headers():
     }
 
 def list_files(parentid=0):
-    """获取文件列表（递归）"""
     url = (f'https://drive.wps.cn/api/v5/groups/{GROUP_ID}/files'
            f'?count=200&offset=0&order=asc&orderby=fname'
            f'&parentid={parentid}&with_link=true')
@@ -40,19 +55,7 @@ def list_files(parentid=0):
     r = urllib.request.urlopen(req, timeout=15)
     return json.loads(r.read()).get('files', [])
 
-def get_file_id(name_pattern, parentid=0):
-    """根据文件名模糊匹配获取 file_id"""
-    for f in list_files(parentid):
-        if name_pattern in f['fname']:
-            return f['id']
-        if f['ftype'] == 'folder':
-            result = get_file_id(name_pattern, f['id'])
-            if result:
-                return result
-    return None
-
 def download_file(file_id):
-    """获取文件下载链接并返回文件字节"""
     url = (f'https://drive.wps.cn/api/v5/groups/{GROUP_ID}/files/{file_id}/download'
            f'?isblocks=0&support_checksums=md5,sha1')
     req = urllib.request.Request(url, headers=_headers())
@@ -65,7 +68,6 @@ def download_file(file_id):
     return r2.read()
 
 def read_xlsx(file_id):
-    """在线读取 xlsx 文件，返回 openpyxl workbook (data_only)"""
     import openpyxl
     from openpyxl.worksheet.datavalidation import DataValidation
     orig_init = DataValidation.__init__
