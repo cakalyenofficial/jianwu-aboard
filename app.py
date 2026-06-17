@@ -1,36 +1,29 @@
 # -*- coding: utf-8 -*-
-"""南京建武数据看板 — 主程序 v2"""
+"""南京建武数据看板 v3 — 接入 WPS 云盘实时数据"""
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import numpy as np
+import data_loader as dl
 
-st.set_page_config(
-    page_title='南京建武数据看板',
-    page_icon='📊',
-    layout='wide',
-    initial_sidebar_state='expanded',
-)
+st.set_page_config(page_title='南京建武数据看板', page_icon='📊', layout='wide')
 
 # ============================================================
 # CSS
 # ============================================================
 st.markdown("""
 <style>
-    .kpi-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 12px; padding: 20px; color: white; text-align: center;
-    }
+    .kpi-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 12px; padding: 20px; color: white; text-align: center; }
     .kpi-card.green { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
     .kpi-card.orange { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
     .kpi-card.blue { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
     .kpi-value { font-size: 28px; font-weight: bold; margin: 8px 0; }
     .kpi-label { font-size: 13px; opacity: 0.9; }
     .kpi-change { font-size: 12px; margin-top: 4px; }
-    .kpi-change.up { color: #38ef7d; }
-    .kpi-change.down { color: #ff6b6b; }
+    .kpi-change.up { color: #38ef7d; } .kpi-change.down { color: #ff6b6b; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -38,352 +31,258 @@ st.markdown("""
 # 工具函数
 # ============================================================
 def kpi_card(label, value, change=None, color='purple'):
-    change_html = ''
+    ch = ''
     if change is not None:
         cls = 'up' if change >= 0 else 'down'
-        arrow = '▲' if change >= 0 else '▼'
-        change_html = f'<div class="kpi-change {cls}">{arrow} {abs(change):.1f}% 环比</div>'
-    return f"""
-    <div class="kpi-card {color}">
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value">{value}</div>
-        {change_html}
-    </div>
-    """
+        ch = f'<div class="kpi-change {cls}">{("▲" if change >= 0 else "▼")} {abs(change):.1f}% 环比</div>'
+    return f'<div class="kpi-card {color}"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div>{ch}</div>'
+
+def _fmt(v):
+    if isinstance(v, (int, float)):
+        return f'¥{v:,.0f}' if abs(v) >= 100 else f'{v:.1f}'
+    return str(v)
 
 def trend_line(df, x, y, title='', height=300):
+    if df.empty: return go.Figure()
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df[x], y=df[y], mode='lines+markers',
-        line=dict(width=2), marker=dict(size=5),
-        name=y, hovertemplate='%{x|%m-%d}<br>%{y:,.0f}'
-    ))
-    fig.update_layout(
-        title=title, height=height, margin=dict(l=20, r=20, t=40, b=20),
-        template='plotly_white', hovermode='x unified',
-    )
+    fig.add_trace(go.Scatter(x=df[x], y=df[y], mode='lines+markers',
+        line=dict(width=2), marker=dict(size=5), name=y))
+    fig.update_layout(title=title, height=height, margin=dict(l=20,r=20,t=40,b=20),
+        template='plotly_white', hovermode='x unified')
     return fig
 
 def multi_line(df, x, ys, labels=None, title='', height=300):
+    if df.empty: return go.Figure()
     if labels is None: labels = ys
     fig = go.Figure()
     for y, label in zip(ys, labels):
-        fig.add_trace(go.Scatter(
-            x=df[x], y=df[y], mode='lines+markers',
-            name=label, line=dict(width=2), marker=dict(size=4),
-        ))
-    fig.update_layout(
-        title=title, height=height, margin=dict(l=20, r=20, t=40, b=20),
-        template='plotly_white', hovermode='x unified',
-    )
+        if y in df.columns:
+            fig.add_trace(go.Scatter(x=df[x], y=df[y], mode='lines+markers',
+                name=label, line=dict(width=2), marker=dict(size=4)))
+    fig.update_layout(title=title, height=height, margin=dict(l=20,r=20,t=40,b=20),
+        template='plotly_white', hovermode='x unified')
     return fig
 
-def gen_daily(n_days=30, seed=42, base_sales=10000, base_cost=3000, base_margin=3000):
-    dates = pd.date_range(end=datetime.now(), periods=n_days, freq='D')
-    np.random.seed(seed)
-    return pd.DataFrame({
-        '日期': dates,
-        '销售额': np.random.randint(base_sales, base_sales*2, n_days).astype(float),
-        '推广费': np.random.randint(base_cost, base_cost*2, n_days).astype(float),
-        '毛利': np.random.randint(base_margin, base_margin*2, n_days).astype(float),
-        '订单数': np.random.randint(20, 100, n_days).astype(int),
-    })
+def daily_kpis(df, cols=['销售额','毛利','订单数']):
+    """从每日数据 DataFrame 提取昨日 KPI + 环比"""
+    if df.empty or len(df) < 2:
+        return {}
+    today = df.iloc[-1]; yesterday = df.iloc[-2]
+    result = {}
+    for c in cols:
+        if c in df.columns:
+            cur = today[c] if not pd.isna(today[c]) else 0
+            prev = yesterday[c] if not pd.isna(yesterday[c]) else 1
+            chg = (cur / prev - 1) * 100 if prev else 0
+            result[c] = (cur, chg)
+    return result
 
 # ============================================================
-# 侧边栏 — 双层导航
+# 侧边栏
 # ============================================================
 st.sidebar.markdown('# 📊 南京建武 数据看板')
 st.sidebar.markdown('---')
-
-layer = st.sidebar.radio(
-    '', ['🏢 公司层', '📦 单品层', '🛒 天猫', '🎵 抖音', '💰 拼多多', '📦 京东'],
-    label_visibility='collapsed',
-)
+layer = st.sidebar.radio('',
+    ['🏢 公司层', '📦 单品层', '🛒 天猫', '🎵 抖音', '💰 拼多多', '📦 京东'],
+    label_visibility='collapsed')
+st.sidebar.markdown('---')
+st.sidebar.caption('数据来源: WPS 云盘')
 
 # ============================================================
 # 🏢 公司层
 # ============================================================
 if layer == '🏢 公司层':
     st.markdown("## 🏢 公司层看板")
+    st.caption('从 001-公司经营销售数据 实时加载...')
 
-    df = gen_daily(15, 42, 60000, 18000, 18000)
-    df['毛利'] = df['销售额'] * 0.32
-    df['毛利率'] = (df['毛利'] / df['销售额'] * 100).round(1)
-    for s in ['天猫','抖音','拼多多','京东']:
-        df[f'{s}销售额'] = np.random.randint(15000, 45000, 15).astype(float)
+    try:
+        kpis = dl.load_company_daily()
+        stores = dl.load_company_store_breakdown()
+        df_tmall = dl.load_tmall_daily()
+        df_dy = dl.load_douyin_daily()
+        df_pdd = dl.load_pdd_daily()
+        df_jd = dl.load_jd_daily()
 
-    today = df.iloc[-1]; yesterday = df.iloc[-2]; month_total = df['销售额'].sum()
+        # 汇总每日数据
+        all_dfs = []
+        for df_s, col_sales in [(df_tmall, '销售额'), (df_dy, '销售额'), (df_pdd, '销售额'), (df_jd, '销售额')]:
+            if not df_s.empty and col_sales in df_s.columns:
+                sub = df_s[['日期', col_sales]].copy()
+                all_dfs.append(sub.rename(columns={col_sales: '销售额'}))
+        if all_dfs:
+            company_daily = all_dfs[0]
+            for d in all_dfs[1:]:
+                company_daily = pd.merge(company_daily, d, on='日期', how='outer', suffixes=('','_dup'))
+            company_daily['销售额'] = company_daily.filter(like='销售额').sum(axis=1)
+            company_daily['毛利'] = company_daily['销售额'] * 0.30
+        else:
+            company_daily = pd.DataFrame()
+    except Exception as e:
+        st.error(f'数据加载失败: {e}')
+        kpis = {}; stores = {}; company_daily = pd.DataFrame()
 
-    st.markdown('### 昨日数据汇总')
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(kpi_card('昨日销售额', f'¥{today["销售额"]:,.0f}',
-            (today['销售额']/yesterday['销售额']-1)*100), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card('昨日毛利', f'¥{today["毛利"]:,.0f}',
-            (today['毛利']/yesterday['毛利']-1)*100, 'green'), unsafe_allow_html=True)
-    with c3:
-        st.markdown(kpi_card('毛利率', f'{today["毛利率"]:.1f}%', color='blue'), unsafe_allow_html=True)
-    with c4:
-        st.markdown(kpi_card('本月累计', f'¥{month_total:,.0f}', color='orange'), unsafe_allow_html=True)
-
-    st.markdown('### 分店铺昨日销售额')
-    ccs = st.columns(4)
-    store_colors = [('🛒 天猫', '天猫销售额', 'purple'), ('🎵 抖音', '抖音销售额', 'blue'),
-                    ('💰 拼多多', '拼多多销售额', 'orange'), ('📦 京东', '京东销售额', 'green')]
-    for c, (name, col, color) in zip(ccs, store_colors):
+    # KPI cards
+    cols = st.columns(4)
+    daily_kpi = daily_kpis(company_daily, ['销售额','毛利']) if not company_daily.empty else {}
+    for c, (label, key, color) in zip(cols, [
+        ('昨日总销售额', '销售额', 'purple'),
+        ('昨日总毛利', '毛利', 'green'),
+    ]):
         with c:
-            st.markdown(kpi_card(name, f'¥{today[col]:,.0f}', color=color), unsafe_allow_html=True)
+            if key in daily_kpi:
+                v, ch = daily_kpi[key]
+                st.markdown(kpi_card(label, _fmt(v), ch, color), unsafe_allow_html=True)
+            else:
+                st.markdown(kpi_card(label, _fmt(kpis.get(label, '--')), color=color), unsafe_allow_html=True)
+    with cols[2]:
+        margin_rate = (kpis.get('毛利率', 0) or 30)
+        st.markdown(kpi_card('毛利率', f'{margin_rate:.1f}%', color='blue'), unsafe_allow_html=True)
+    with cols[3]:
+        monthly = company_daily['销售额'].sum() if not company_daily.empty else 0
+        st.markdown(kpi_card('本月累计', _fmt(monthly), color='orange'), unsafe_allow_html=True)
+
+    # 分店铺
+    st.markdown('### 分店铺昨日')
+    ccs = st.columns(4)
+    for c, (name, color) in zip(ccs, [('天猫', 'purple'), ('抖音', 'blue'), ('拼多多', 'orange'), ('京东', 'green')]):
+        with c:
+            st.markdown(kpi_card(name, _fmt(stores.get(f'{name}销售额', 0)), color=color), unsafe_allow_html=True)
 
     st.markdown('---')
     cl, cr = st.columns(2)
     with cl:
-        st.plotly_chart(trend_line(df, '日期', '销售额', '近15天销售额趋势'), use_container_width=True)
-        st.plotly_chart(trend_line(df, '日期', '毛利', '近15天毛利趋势'), use_container_width=True)
+        st.plotly_chart(trend_line(company_daily, '日期', '销售额', '近15天销售额趋势'), use_container_width=True)
     with cr:
-        store_keys = ['天猫销售额','抖音销售额','拼多多销售额','京东销售额']
-        st.plotly_chart(multi_line(df, '日期', store_keys, ['天猫','抖音','拼多多','京东'],
-            '近15天分店铺销售额趋势'), use_container_width=True)
-        st.markdown('### 当月汇总 vs 目标')
-        st.dataframe(pd.DataFrame({
-            '指标': ['销售额', '毛利', '毛利率'],
-            '本月实际': [f'¥{month_total:,.0f}', f'¥{month_total*0.32:,.0f}', '32.0%'],
-            '本月目标': ['¥3,000,000', '¥960,000', '32%'],
-            '完成率': [f'{month_total/3000000*100:.1f}%', f'{month_total*0.32/960000*100:.1f}%', '100%'],
-        }), hide_index=True, use_container_width=True)
+        store_dfs = {'天猫': df_tmall, '抖音': df_dy, '拼多多': df_pdd, '京东': df_jd}
+        st.plotly_chart(multi_line(company_daily, '日期', ['销售额'], ['总销售额'], '近期销售趋势'), use_container_width=True)
 
 # ============================================================
 # 📦 单品层
 # ============================================================
 elif layer == '📦 单品层':
     st.markdown("## 📦 单品层数据看板")
+    st.caption('从 001-单品数据统计表 + 009-进销存 实时加载...')
 
-    products = ['CK01-平衡车','CK02-自行车14寸','CK03-自行车16寸',
-                'CK05-滑板车','CK07-自行车12寸','CK08-三轮车',
-                'CK09-电动童车','CK10-儿童头盔']
-    df = pd.DataFrame({
-        '单品': products,
-        '昨日销售额': np.random.randint(2000, 15000, 8),
-        '昨日销量': np.random.randint(10, 60, 8),
-        '毛利率': np.random.uniform(25, 45, 8).round(1),
-        '7日销售额': np.random.randint(15000, 80000, 8),
-        '7日销量': np.random.randint(60, 300, 8),
-        '库存': np.random.randint(50, 500, 8),
-        '日均销量': np.random.randint(5, 30, 8),
-    })
+    try:
+        products = dl.load_product_stats()
+        inventory = dl.load_inventory()
+        if not products.empty and not inventory.empty:
+            # 合并库存
+            products['型号_clean'] = products['单品'].str.extract(r'(CK\d+)', expand=False)
+            inventory['型号_clean'] = inventory['型号'].str.extract(r'(CK\d+)', expand=False)
+            products = products.merge(inventory[['型号_clean','当前库存','日均销量']],
+                                      on='型号_clean', how='left')
+            products['当前库存'] = products['当前库存'].fillna(0)
+            products['日均销量'] = products['日均销量'].fillna(1)
+    except Exception as e:
+        st.error(f'数据加载失败: {e}')
+        products = pd.DataFrame()
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(kpi_card('单品总数', f'{len(df)}个', color='purple'), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card('昨日单品总销售', f'¥{df["昨日销售额"].sum():,.0f}',
-            color='green'), unsafe_allow_html=True)
-    with c3:
-        st.markdown(kpi_card('平均毛利率', f'{df["毛利率"].mean():.1f}%',
-            color='blue'), unsafe_allow_html=True)
-
-    st.markdown('### 单品销售明细')
-    disp = df.copy()
-    disp['库存天数'] = (disp['库存'] / disp['日均销量'].replace(0, 1)).round(0)
-    disp['状态'] = disp['库存天数'].apply(
-        lambda x: '⚠️ 缺货' if x < 7 else ('✅ 正常' if x < 60 else '📦 滞销'))
-    st.dataframe(disp[['单品','昨日销售额','昨日销量','毛利率','7日销售额','7日销量','库存','库存天数','状态']],
-                 hide_index=True, use_container_width=True,
-                 column_config={'昨日销售额':'¥%d','7日销售额':'¥%d','毛利率':'%.1f%%'})
-
-    st.markdown('---')
-    st.markdown('### 库存预警')
-    alert = df[df['库存']/df['日均销量'].replace(0,1) < 7]
-    if len(alert):
-        for _, r in alert.iterrows():
-            st.warning(f"⚠️ **{r['单品']}** — 库存仅剩 {r['库存']} 件")
+    if products.empty:
+        st.warning('暂无单品数据')
     else:
-        st.success('✅ 所有单品库存充足')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(kpi_card('单品数', f'{len(products)}', color='purple'), unsafe_allow_html=True)
+        with c2:
+            st.markdown(kpi_card('总销售', _fmt(products['销售额'].sum()), color='green'), unsafe_allow_html=True)
+        with c3:
+            st.markdown(kpi_card('平均毛利率', f'{products["毛利率"].mean():.1f}%', color='blue'), unsafe_allow_html=True)
 
-    slow = df[df['库存']/df['日均销量'].replace(0,1) > 60]
-    if len(slow):
-        st.markdown('#### 滞销品')
-        for _, r in slow.iterrows():
-            st.info(f"📦 **{r['单品']}** — 库存 {r['库存']} 件，周转 {int(r['库存']/max(r['日均销量'],1))} 天")
+        st.markdown('### 单品销售明细')
+        disp = products[['单品','销售额','销量','毛利率','推广费','当前库存','日均销量']].copy()
+        disp = disp[disp['销售额'] > 0]
+        disp['库存天数'] = (disp['当前库存'] / disp['日均销量'].replace(0,1)).round(0)
+        disp['状态'] = disp['库存天数'].apply(
+            lambda x: '⚠️ 缺货' if x < 7 else ('✅ 正常' if x < 60 else '📦 滞销'))
+        st.dataframe(disp, hide_index=True, use_container_width=True)
 
-    st.markdown('---')
-    ca, cb = st.columns(2)
-    with ca:
-        fig = px.pie(df, values='昨日销售额', names='单品', title='昨日单品销售额占比')
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig, use_container_width=True)
-    with cb:
-        fig2 = px.bar(df, x='单品', y='毛利率', title='各单品毛利率对比', color='毛利率', color_continuous_scale='Blues')
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ============================================================
-# 🏬 四平台店铺层 — 天猫
-# ============================================================
-elif layer == '🛒 天猫':
-    st.markdown("## 🛒 天猫平台看板")
-
-    df = gen_daily(30, 101, 15000, 4000, 4500)
-
-    t = df.iloc[-1]; y = df.iloc[-2]; m = df.iloc[-30:]
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(kpi_card('销售额', f'¥{t["销售额"]:,.0f}',
-            (t['销售额']/y['销售额']-1)*100), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card('毛利', f'¥{t["毛利"]:,.0f}',
-            (t['毛利']/y['毛利']-1)*100, 'green'), unsafe_allow_html=True)
-    with c3:
-        roi = t['毛利']/max(t['推广费'],1)
-        st.markdown(kpi_card('推广ROI', f'{roi:.1f}', color='blue'), unsafe_allow_html=True)
-    with c4:
-        st.markdown(kpi_card('订单数', f'{t["订单数"]}', color='orange'), unsafe_allow_html=True)
-
-    st.markdown('---')
-    cl, cr = st.columns(2)
-    with cl:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','毛利'], ['销售额','毛利'],
-            '近30天销售额/毛利趋势'), use_container_width=True)
-    with cr:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','推广费'], ['销售额','推广费'],
-            '销售额 vs 推广费'), use_container_width=True)
-
-    st.markdown('---')
-    msum = m['销售额'].sum(); mcost = m['推广费'].sum(); mmargin = m['毛利'].sum()
-    st.markdown('### 月度汇总')
-    st.dataframe(pd.DataFrame({
-        '指标': ['销售额','毛利','推广费','订单数','推广ROI'],
-        '本月': [f'¥{msum:,.0f}',f'¥{mmargin:,.0f}',f'¥{mcost:,.0f}',
-                f'{m["订单数"].sum()}',f'{mmargin/max(mcost,1):.1f}'],
-        '上月': [f'¥{msum*0.9:,.0f}',f'¥{mmargin*0.85:,.0f}',f'¥{mcost*1.05:,.0f}',
-                f'{int(m["订单数"].sum()*0.88)}',f'{mmargin*0.85/max(mcost*1.05,1):.1f}'],
-    }), hide_index=True, use_container_width=True)
+        st.markdown('---')
+        st.markdown('### 库存预警')
+        alert = disp[disp['库存天数'] < 7]
+        if len(alert):
+            for _, r in alert.iterrows():
+                st.warning(f"⚠️ {r['单品']} — 库存仅剩 {int(r['当前库存'])} 件")
+        else:
+            st.success('✅ 所有单品库存充足')
 
 # ============================================================
-# 🎵 抖音
+# 🛒 天猫
 # ============================================================
-elif layer == '🎵 抖音':
-    st.markdown("## 🎵 抖音平台看板")
+elif layer in ['🛒 天猫', '🎵 抖音', '💰 拼多多', '📦 京东']:
+    store_name = layer.split()[-1]
+    st.markdown(f"## {layer} 平台看板")
+    st.caption(f'从 WPS 云盘实时加载...')
 
-    df = gen_daily(30, 202, 20000, 6000, 6000)
+    loaders = {
+        '天猫': dl.load_tmall_daily,
+        '抖音': dl.load_douyin_daily,
+        '拼多多': dl.load_pdd_daily,
+        '京东': dl.load_jd_daily,
+    }
 
-    t = df.iloc[-1]; y = df.iloc[-2]; m = df.iloc[-30:]
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(kpi_card('销售额', f'¥{t["销售额"]:,.0f}',
-            (t['销售额']/y['销售额']-1)*100), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card('毛利', f'¥{t["毛利"]:,.0f}',
-            (t['毛利']/y['毛利']-1)*100, 'green'), unsafe_allow_html=True)
-    with c3:
-        roi = t['毛利']/max(t['推广费'],1)
-        st.markdown(kpi_card('推广ROI', f'{roi:.1f}', color='blue'), unsafe_allow_html=True)
-    with c4:
-        st.markdown(kpi_card('订单数', f'{t["订单数"]}', color='orange'), unsafe_allow_html=True)
+    try:
+        df = loaders[store_name]()
+    except Exception as e:
+        st.error(f'数据加载失败: {e}')
+        df = pd.DataFrame()
 
-    st.markdown('---')
-    cl, cr = st.columns(2)
-    with cl:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','毛利'], ['销售额','毛利'],
-            '近30天销售额/毛利趋势'), use_container_width=True)
-    with cr:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','推广费'], ['销售额','推广费'],
-            '销售额 vs 推广费'), use_container_width=True)
+    if df.empty:
+        st.warning(f'{store_name}暂无每日数据，尝试从公司总表中提取...')
+        try:
+            df = dl.load_company_store_daily(store_name)
+        except:
+            pass
 
-    st.markdown('---')
-    msum = m['销售额'].sum(); mcost = m['推广费'].sum(); mmargin = m['毛利'].sum()
-    st.markdown('### 月度汇总')
-    st.dataframe(pd.DataFrame({
-        '指标': ['销售额','毛利','推广费','订单数','推广ROI'],
-        '本月': [f'¥{msum:,.0f}',f'¥{mmargin:,.0f}',f'¥{mcost:,.0f}',
-                f'{m["订单数"].sum()}',f'{mmargin/max(mcost,1):.1f}'],
-        '上月': [f'¥{msum*0.92:,.0f}',f'¥{mmargin*0.88:,.0f}',f'¥{mcost*0.98:,.0f}',
-                f'{int(m["订单数"].sum()*0.95)}',f'{mmargin*0.88/max(mcost*0.98,1):.1f}'],
-    }), hide_index=True, use_container_width=True)
+    if df.empty:
+        st.error(f'无法获取{store_name}数据，请检查 WPS 云盘文件')
+    else:
+        kpis_d = daily_kpis(df, ['销售额','毛利','订单数'])
 
-# ============================================================
-# 💰 拼多多
-# ============================================================
-elif layer == '💰 拼多多':
-    st.markdown("## 💰 拼多多平台看板")
+        cols = st.columns(4)
+        for c, (label, key, color) in zip(cols, [
+            ('销售额', '销售额', 'purple'),
+            ('毛利', '毛利', 'green'),
+            ('推广ROI', '推广费', 'blue'),
+            ('订单数', '订单数', 'orange'),
+        ]):
+            with c:
+                if key in kpis_d:
+                    v, ch = kpis_d[key]
+                    if key == '推广费':
+                        sales_v = kpis_d.get('销售额', (0,0))[0]
+                        roi = sales_v / max(v, 1)
+                        st.markdown(kpi_card('推广ROI', f'{roi:.1f}', color=color), unsafe_allow_html=True)
+                    elif key == '订单数':
+                        st.markdown(kpi_card(label, f'{int(v)}', color=color), unsafe_allow_html=True)
+                    else:
+                        st.markdown(kpi_card(label, _fmt(v), ch, color), unsafe_allow_html=True)
+                else:
+                    st.markdown(kpi_card(label, '--', color=color), unsafe_allow_html=True)
 
-    df = gen_daily(30, 303, 8000, 2000, 2500)
+        st.markdown('---')
+        cl, cr = st.columns(2)
+        with cl:
+            st.plotly_chart(trend_line(df, '日期', '销售额', f'{store_name}近30天销售额趋势'), use_container_width=True)
+        with cr:
+            available_cols = [c for c in ['推广费','毛利'] if c in df.columns]
+            if available_cols:
+                st.plotly_chart(multi_line(df, '日期', ['销售额'] + available_cols,
+                    ['销售额'] + available_cols, f'{store_name}趋势对比'), use_container_width=True)
 
-    t = df.iloc[-1]; y = df.iloc[-2]; m = df.iloc[-30:]
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(kpi_card('销售额', f'¥{t["销售额"]:,.0f}',
-            (t['销售额']/y['销售额']-1)*100), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card('毛利', f'¥{t["毛利"]:,.0f}',
-            (t['毛利']/y['毛利']-1)*100, 'green'), unsafe_allow_html=True)
-    with c3:
-        roi = t['毛利']/max(t['推广费'],1)
-        st.markdown(kpi_card('推广ROI', f'{roi:.1f}', color='blue'), unsafe_allow_html=True)
-    with c4:
-        st.markdown(kpi_card('订单数', f'{t["订单数"]}', color='orange'), unsafe_allow_html=True)
-
-    st.markdown('---')
-    cl, cr = st.columns(2)
-    with cl:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','毛利'], ['销售额','毛利'],
-            '近30天销售额/毛利趋势'), use_container_width=True)
-    with cr:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','推广费'], ['销售额','推广费'],
-            '销售额 vs 推广费'), use_container_width=True)
-
-    st.markdown('---')
-    msum = m['销售额'].sum(); mcost = m['推广费'].sum(); mmargin = m['毛利'].sum()
-    st.markdown('### 月度汇总')
-    st.dataframe(pd.DataFrame({
-        '指标': ['销售额','毛利','推广费','订单数','推广ROI'],
-        '本月': [f'¥{msum:,.0f}',f'¥{mmargin:,.0f}',f'¥{mcost:,.0f}',
-                f'{m["订单数"].sum()}',f'{mmargin/max(mcost,1):.1f}'],
-        '上月': [f'¥{msum*0.87:,.0f}',f'¥{mmargin*0.9:,.0f}',f'¥{mcost*0.95:,.0f}',
-                f'{int(m["订单数"].sum()*0.83)}',f'{mmargin*0.9/max(mcost*0.95,1):.1f}'],
-    }), hide_index=True, use_container_width=True)
-
-# ============================================================
-# 📦 京东
-# ============================================================
-elif layer == '📦 京东':
-    st.markdown("## 📦 京东平台看板")
-
-    df = gen_daily(30, 404, 12000, 3000, 3500)
-
-    t = df.iloc[-1]; y = df.iloc[-2]; m = df.iloc[-30:]
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(kpi_card('销售额', f'¥{t["销售额"]:,.0f}',
-            (t['销售额']/y['销售额']-1)*100), unsafe_allow_html=True)
-    with c2:
-        st.markdown(kpi_card('毛利', f'¥{t["毛利"]:,.0f}',
-            (t['毛利']/y['毛利']-1)*100, 'green'), unsafe_allow_html=True)
-    with c3:
-        roi = t['毛利']/max(t['推广费'],1)
-        st.markdown(kpi_card('推广ROI', f'{roi:.1f}', color='blue'), unsafe_allow_html=True)
-    with c4:
-        st.markdown(kpi_card('订单数', f'{t["订单数"]}', color='orange'), unsafe_allow_html=True)
-
-    st.markdown('---')
-    cl, cr = st.columns(2)
-    with cl:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','毛利'], ['销售额','毛利'],
-            '近30天销售额/毛利趋势'), use_container_width=True)
-    with cr:
-        st.plotly_chart(multi_line(df, '日期', ['销售额','推广费'], ['销售额','推广费'],
-            '销售额 vs 推广费'), use_container_width=True)
-
-    st.markdown('---')
-    msum = m['销售额'].sum(); mcost = m['推广费'].sum(); mmargin = m['毛利'].sum()
-    st.markdown('### 月度汇总')
-    st.dataframe(pd.DataFrame({
-        '指标': ['销售额','毛利','推广费','订单数','推广ROI'],
-        '本月': [f'¥{msum:,.0f}',f'¥{mmargin:,.0f}',f'¥{mcost:,.0f}',
-                f'{m["订单数"].sum()}',f'{mmargin/max(mcost,1):.1f}'],
-        '上月': [f'¥{msum*0.91:,.0f}',f'¥{mmargin*0.86:,.0f}',f'¥{mcost*1.02:,.0f}',
-                f'{int(m["订单数"].sum()*0.89)}',f'{mmargin*0.86/max(mcost*1.02,1):.1f}'],
-    }), hide_index=True, use_container_width=True)
+        # 月度汇总
+        monthly = df[df['日期'] >= df['日期'].max() - timedelta(days=30)]
+        if not monthly.empty:
+            st.markdown('### 月度汇总')
+            msum = monthly['销售额'].sum()
+            mcost = monthly['推广费'].sum() if '推广费' in monthly.columns else 0
+            mmargin = monthly['毛利'].sum() if '毛利' in monthly.columns else msum * 0.3
+            st.dataframe(pd.DataFrame({
+                '指标': ['销售额','毛利','推广费','订单数'],
+                '本月': [_fmt(msum), _fmt(mmargin), _fmt(mcost),
+                        f'{int(monthly["订单数"].sum()) if "订单数" in monthly.columns else "--"}'],
+            }), hide_index=True, use_container_width=True)
 
 # ============================================================
 st.markdown('---')
-st.caption(f'数据更新时间: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
+st.caption(f'更新时间: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
