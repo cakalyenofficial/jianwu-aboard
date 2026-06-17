@@ -25,6 +25,22 @@ streamlit run app.py
 # → http://localhost:8501
 ```
 
+## 项目迁移（换机器）
+
+整个文件夹复制到新机器即可，项目完全自包含。步骤：
+
+```bash
+# 方式一：从旧机器直接拷贝整个 jianwu-aboard/ 文件夹
+# 方式二：git clone + 手动复制 cookies.xlsx
+git clone https://github.com/cakalyenofficial/jianwu-aboard.git
+# 然后把 cookies.xlsx 复制进去（.gitignore，不会提交）
+
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+⚠️ **`cookies.xlsx` 必须随文件夹一起复制**，内含 WPS 云盘认证凭据，GitHub 上无此文件。
+
 ## Streamlit Cloud 部署
 
 代码推送 GitHub 后自动部署。需在 Streamlit Cloud 的 Secrets 中配置：
