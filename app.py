@@ -269,7 +269,110 @@ elif layer in ['🛒 天猫', '🎵 抖音', '💰 拼多多', '📦 京东']:
 
     if df.empty:
         st.error(f'无法获取{store_name}数据，请检查 WPS 云盘文件')
+    elif store_name == '天猫':
+        # ====== 天猫专属看板 ======
+        tm_m = dl.load_tmall_monthly()
+        tm_gsv = tm_m.get('GSV', 0)
+        tm_profit = tm_m.get('利润目标', 0)
+        tm_cost = tm_m.get('站内推广费', 0) + tm_m.get('站外推广费', 0)
+
+        # 昨日/近7天/本月数据
+        yd = df[df['日期'] == df['日期'].max()] if not df.empty else pd.DataFrame()
+        yd_s = float(yd['销售额'].sum()) if not yd.empty and '销售额' in yd.columns else 0
+        yd_p = float(yd['毛利'].sum()) if not yd.empty and '毛利' in yd.columns else 0
+        yd_c = float(yd['推广费'].sum()) if not yd.empty and '推广费' in yd.columns else 0
+
+        today_d = datetime.now().date()
+        d7 = df[df['日期'] >= today_d - timedelta(days=7)]
+        d7_s = float(d7['销售额'].sum()) if not d7.empty and '销售额' in d7.columns else 0
+        d7_p = float(d7['毛利'].sum()) if not d7.empty and '毛利' in d7.columns else 0
+        d7_c = float(d7['推广费'].sum()) if not d7.empty and '推广费' in d7.columns else 0
+
+        # 三个月度KPI表
+        def _t(v):
+            if isinstance(v,(int,float)):
+                if abs(v)>=100: return f'\u00a5{v:,.0f}'
+                return f'{v:.1f}'
+            return str(v)
+        def _ch(v): return f'{v:.1f}%'
+
+        st.markdown('### \u5929\u732b\u5e97\u94fa\u6570\u636e')
+        c0,c1,c2,c3,c4,c5 = st.columns([1.2,1,1,1,1,1])
+        with c0: st.caption('')
+        with c1: st.caption('GSV')
+        with c2: st.caption('\u5229\u6da6\u989d')
+        with c3: st.caption('\u5229\u6da6\u7387')
+        with c4: st.caption('\u63a8\u5e7f\u603b\u989d')
+        with c5: st.caption('\u63a8\u5e7f\u5360\u6bd4')
+
+        c0,c1,c2,c3,c4,c5 = st.columns([1.2,1,1,1,1,1])
+        with c0: st.markdown('**\u5f53\u6708**')
+        with c1: st.metric('', _t(tm_gsv))
+        with c2: st.metric('', _t(tm_profit))
+        with c3: st.metric('', _ch(tm_profit/tm_gsv*100 if tm_gsv else 0))
+        with c4: st.metric('', _t(tm_cost))
+        with c5: st.metric('', _ch(tm_cost/tm_gsv*100 if tm_gsv else 0))
+
+        c0,c1,c2,c3,c4,c5 = st.columns([1.2,1,1,1,1,1])
+        with c0: st.markdown('**\u8fd17\u5929**')
+        with c1: st.metric('', _t(d7_s))
+        with c2: st.metric('', _t(d7_p))
+        with c3: st.metric('', _ch(d7_p/d7_s*100 if d7_s else 0))
+        with c4: st.metric('', _t(d7_c))
+        with c5: st.metric('', _ch(d7_c/d7_s*100 if d7_s else 0))
+
+        c0,c1,c2,c3,c4,c5 = st.columns([1.2,1,1,1,1,1])
+        with c0: st.markdown('**\u6628\u65e5**')
+        with c1: st.metric('', _t(yd_s))
+        with c2: st.metric('', _t(yd_p))
+        with c3: st.metric('', _ch(yd_p/yd_s*100 if yd_s else 0))
+        with c4: st.metric('', _t(yd_c))
+        with c5: st.metric('', _ch(yd_c/yd_s*100 if yd_s else 0))
+
+        st.markdown('---')
+        # 7天趋势
+        cl, cr = st.columns(2)
+        with cl:
+            if not d7.empty:
+                fig7 = go.Figure()
+                fig7.add_trace(go.Scatter(x=d7['日期'], y=d7['销售额'], mode='lines+markers',
+                    name='GSV', line=dict(width=2, color='#667eea')))
+                if '毛利' in d7.columns:
+                    fig7.add_trace(go.Scatter(x=d7['日期'], y=d7['毛利'], mode='lines+markers',
+                        name='\u6bdb\u5229', line=dict(width=2, color='#38ef7d')))
+                fig7.update_layout(title='\u8fd17\u5929\u9500\u552e\u989d&\u6bdb\u5229\u8d8b\u52bf', height=300,
+                    margin=dict(l=20,r=20,t=40,b=20), template='plotly_white', hovermode='x unified')
+                st.plotly_chart(fig7, use_container_width=True)
+        with cr:
+            # 月度柱状图
+            if not df.empty and '销售额' in df.columns:
+                df['_m'] = df['日期'].apply(lambda x: x.strftime('%y/%m'))
+                ms = df.groupby('_m')['销售额'].sum().tail(6)
+                mm = df.groupby('_m')['毛利'].sum().tail(6) if '毛利' in df.columns else ms*0.3
+                fig_m = go.Figure()
+                fig_m.add_trace(go.Bar(x=ms.index.tolist(), y=ms.values.round(0).tolist(), name='GSV', marker_color='#667eea'))
+                fig_m.add_trace(go.Bar(x=mm.index.tolist(), y=mm.values.round(0).tolist(), name='\u6bdb\u5229', marker_color='#38ef7d'))
+                fig_m.update_layout(title='\u8fd16\u4e2a\u6708GSV\u4e0e\u6bdb\u5229\u5bf9\u6bd4', height=300, barmode='group',
+                    margin=dict(l=20,r=20,t=40,b=20), template='plotly_white', legend=dict(orientation='h', y=1.15))
+                st.plotly_chart(fig_m, use_container_width=True)
+
+        # 30天趋势
+        st.plotly_chart(trend_line(df, '日期', '销售额', f'{store_name}\u8fd130\u5929\u9500\u552e\u989d\u8d8b\u52bf'), use_container_width=True)
+
+        # 月度汇总表
+        monthly = df[df['日期'] >= df['日期'].max() - timedelta(days=30)]
+        if not monthly.empty:
+            st.markdown('### \u6708\u5ea6\u6c47\u603b')
+            msum = monthly['销售额'].sum()
+            mcost = monthly['推广费'].sum() if '推广费' in monthly.columns else 0
+            mmargin = monthly['毛利'].sum() if '毛利' in monthly.columns else msum * 0.3
+            st.dataframe(pd.DataFrame({
+                '\u6307\u6807': ['\u9500\u552e\u989d','\u6bdb\u5229','\u63a8\u5e7f\u8d39','\u8ba2\u5355\u6570'],
+                '\u672c\u6708': [_fmt(msum), _fmt(mmargin), _fmt(mcost),
+                        f'{int(monthly["\u8ba2\u5355\u6570"].sum()) if "\u8ba2\u5355\u6570" in monthly.columns else "--"}'],
+            }), hide_index=True, use_container_width=True)
     else:
+        # ====== 其他平台 ======
         kpis_d = daily_kpis(df, ['销售额','毛利','订单数'])
 
         cols = st.columns(4)

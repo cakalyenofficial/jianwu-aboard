@@ -264,39 +264,50 @@ def load_tmall_daily():
 # 抖音
 # ============================================================
 def load_douyin_daily():
-    """003/销售额-抖音CK: col0=WPS序列号, col1=GMV, col2=广告消耗, col3=退款金额"""
+    """抖音三店合并: 003/销售额-抖音CK + 销售额-抖音折叠车 + 销售额-抖音CK微瑕"""
     try:
         wb = _load_workbook('003-2026年抖音CK店铺数据表.xlsx')
     except Exception:
         return pd.DataFrame()
 
-    if '销售额-抖音CK' not in wb.sheetnames:
+    def _parse_sheet(sheet_name, skip_rows, cost_col=2):
+        if sheet_name not in wb.sheetnames:
+            return pd.DataFrame()
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        records = []
+        for row in rows[skip_rows:]:
+            if not row or row[0] is None:
+                continue
+            d = _safe_date(row[0])
+            if d is None:
+                continue
+            gmv = _num(row[1]) if len(row) > 1 else 0
+            cost = _num(row[cost_col]) if len(row) > cost_col else 0
+            gsv = _num(row[4] if sheet_name != '销售额-抖音折叠车' else row[6]) if len(row) > 4 else gmv
+            records.append({
+                '日期': d,
+                '销售额': gmv,
+                '推广费': cost,
+                '订单数': 0,
+                '毛利': max(gsv - cost, 0) * 0.3,
+            })
+        return pd.DataFrame(records)
+
+    # 三店各有不同 skip_rows: CK=11, 折叠车=4, 微瑕=9
+    df1 = _parse_sheet('销售额-抖音CK', 11, cost_col=2)
+    df2 = _parse_sheet('销售额-抖音折叠车', 4, cost_col=4)
+    df3 = _parse_sheet('销售额-抖音CK微瑕', 9, cost_col=2)
+
+    parts = [df1, df2, df3]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
         return pd.DataFrame()
-    ws = wb['销售额-抖音CK']
-    rows = list(ws.iter_rows(values_only=True))
 
-    records = []
-    # 跳过行0-10（月度汇总），从行11开始才是每日数据
-    for row in rows[11:]:
-        if not row or row[0] is None:
-            continue
-        d = _safe_date(row[0])
-        if d is None:
-            continue
-        gmv = _num(row[1]) if len(row) > 1 else 0
-        cost = _num(row[2]) if len(row) > 2 else 0
-        refund = _num(row[3]) if len(row) > 3 else 0
-        sales = gmv  # GMV 即销售额
-        records.append({
-            '日期': d,
-            '销售额': sales,
-            '推广费': cost,
-            '订单数': 0,
-            '毛利': max(sales - refund, 0) * 0.3,  # 用 GSV 估算毛利
-        })
-
-    df = pd.DataFrame(records)
-    return _finalize_daily(df)
+    merged = pd.concat(parts).groupby('日期', as_index=False).agg({
+        '销售额': 'sum', '推广费': 'sum', '订单数': 'sum', '毛利': 'sum',
+    })
+    return _finalize_daily(merged)
 
 # ============================================================
 # 拼多多
@@ -403,3 +414,19 @@ def load_company_store_daily(store_name):
     rows = list(ws.iter_rows(values_only=True))
     return _finalize_daily(_parse_daily_sheet(rows, date_col=0, sales_col=6 if store_name == '天猫' else 3,
                                orders_col=4, skip_rows=6))
+
+# ============================================================
+# 天猫月度汇总（002-天猫销售数据/店铺销售数据源）
+# ============================================================
+@st.cache_data(ttl=86400)
+def load_tmall_monthly():
+    wb = _load_workbook('002-2025年天猫销售数据.xlsx')
+    ws = wb['店铺销售数据源']
+    rows = list(ws.iter_rows(values_only=True))
+    result = {}
+    for row in rows[2:10]:
+        key = str(row[1] or '').strip()
+        val = row[3]
+        if key and isinstance(val, (int, float)):
+            result[key] = float(val)
+    return result
