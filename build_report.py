@@ -31,6 +31,52 @@ try:
 except Exception as e:
     print(f'  WARN: 002 failed: {e}')
 
+# ---- Tmall product detail from 002 ----
+tm_products = []
+try:
+    ws3 = wb2['单品数据明细']
+    r3 = list(ws3.iter_rows(values_only=True))
+    r3h = r3[1]  # date header row
+    june_cols = [j for j,v in enumerate(r3h) if isinstance(v, datetime) and v.year==2026 and v.month==6]
+    may_cols = [j for j,v in enumerate(r3h) if isinstance(v, datetime) and v.year==2026 and v.month==5]
+    prod_links = {}
+    for i, row in enumerate(r3):
+        if not row or not row[0]: continue
+        pn = str(row[0]).strip()
+        if pn not in ['CK09','CK08','CK06','L1','K01','L2','K7']: continue
+        link = str(row[1]) if row[1] and len(str(row[1])) > 5 else ''
+        if not link: continue
+        if pn not in prod_links: prod_links[pn] = []
+        gsv_j = qty_j = cost_j = gsv_m = qty_m = cost_m = 0
+        for k in range(i+1, min(i+13, len(r3))):
+            mr = r3[k]
+            if not mr or not mr[2]: continue
+            m = str(mr[2] or '')
+            if 'GSV' in m:
+                gsv_j = sum(float(mr[c] or 0) for c in june_cols if c < len(mr) and isinstance(mr[c], (int, float)))
+                gsv_m = sum(float(mr[c] or 0) for c in may_cols if c < len(mr) and isinstance(mr[c], (int, float)))
+            elif '支付件数' in m:
+                qty_j = sum(float(mr[c] or 0) for c in june_cols if c < len(mr) and isinstance(mr[c], (int, float)))
+                qty_m = sum(float(mr[c] or 0) for c in may_cols if c < len(mr) and isinstance(mr[c], (int, float)))
+            elif '产品成本' in m:
+                cost_j = sum(float(mr[c] or 0) for c in june_cols if c < len(mr) and isinstance(mr[c], (int, float)))
+                cost_m = sum(float(mr[c] or 0) for c in may_cols if c < len(mr) and isinstance(mr[c], (int, float)))
+        prod_links[pn].append(dict(link=link[:16], gsv_j=gsv_j, qty_j=qty_j, cost_j=cost_j,
+                                    margin_j=gsv_j-cost_j, gsv_m=gsv_m, qty_m=qty_m, cost_m=cost_m, margin_m=gsv_m-cost_m))
+    for pn in ['CK09','CK08','CK06','L1','K01','L2','K7']:
+        if pn in prod_links:
+            pls = prod_links[pn]
+            tm_products.append(dict(name=pn, links=len(pls),
+                gsv=sum(l['gsv_j'] for l in pls), qty=sum(l['qty_j'] for l in pls),
+                cost=sum(l['cost_j'] for l in pls), margin=sum(l['margin_j'] for l in pls),
+                gsv_prev=sum(l['gsv_m'] for l in pls), margin_prev=sum(l['margin_m'] for l in pls),
+                detail=pls))
+except Exception as e:
+    print(f'  WARN: product detail failed: {e}')
+
+# Product table HTML built later (after helpers defined)
+tm_prod_html = None
+
 # ---- helpers ----
 def F(v):
     if isinstance(v, (int, float)):
@@ -60,8 +106,8 @@ def CJ(df, name, title=''):
     xc, yc = df.columns[0], df.columns[1]
     return json.dumps(dict(data=[dict(x=df[xc].astype(str).tolist(), y=df[yc].fillna(0).round(2).tolist(),
         type='scatter', mode='lines+markers', name=name, line=dict(width=2), marker=dict(size=5))],
-        layout=dict(title=title, height=300, margin=dict(l=50, r=20, t=40, b=30),
-        template='plotly_white', hovermode='x unified')))
+        layout=dict(title=dict(text=title, font=dict(size=14)), height=340,
+            margin=dict(l=50, r=20, t=50, b=30), template='plotly_white', hovermode='x unified')))
 
 def MC(df, title=''):
     if df.empty: return '{}'
@@ -71,7 +117,7 @@ def MC(df, title=''):
     for i, c in enumerate(sc):
         tr.append(dict(x=df['date'].astype(str).tolist(), y=df[c].fillna(0).round(2).tolist(),
             type='scatter', mode='lines+markers', name=c, line=dict(width=2, color=clrs[i % 4]), marker=dict(size=4)))
-    return json.dumps(dict(data=tr, layout=dict(title=title, height=300,
+    return json.dumps(dict(data=tr, layout=dict(title=dict(text=title, font=dict(size=14)), height=340,
         margin=dict(l=50, r=20, t=40, b=30), template='plotly_white', hovermode='x unified',
         legend=dict(orientation='h', y=1.15))))
 
@@ -126,19 +172,26 @@ def SC(df, c):
 
 tdc = df_tm.columns if not df_tm.empty else []
 ydf = df_tm[df_tm[tdc[0]] == yesterday] if not df_tm.empty and len(tdc) > 0 else None
-ys = SC(ydf, 1); yp = SC(ydf, 4); yc = SC(ydf, 2)
-d7f = df_tm[df_tm[tdc[0]] >= yesterday - timedelta(days=7)] if not df_tm.empty and len(tdc) > 0 else None
-d7s = SC(d7f, 1); d7p = SC(d7f, 4); d7c = SC(d7f, 2)
+ys = SC(ydf, 1); yp = SC(ydf, 4)
+# Tmall daily sheet has no cost column; estimate from monthly prorated
+d7f = df_tm[(df_tm[tdc[0]] >= today - timedelta(days=7)) & (df_tm[tdc[0]] <= yesterday)] if not df_tm.empty and len(tdc) > 0 else None
+d7s = SC(d7f, 1); d7p = SC(d7f, 4)
+# Estimate cost: monthly cost / monthly days * window days
+d7_cost = tc / max(ldate.day, 1) * min(7, ldate.day) if tc and ldate else 0
+yd_cost = tc / max(ldate.day, 1) if tc and ldate else 0
 
-def KR(lbl, g, pr, pct_p, ct, pct_c, chg=0):
-    return '<tr><td class=rl>{}</td><td class=num>{}<br><span class=sc>{}</span></td><td class=num>{}</td><td class=num>{}%</td><td class=num>{}</td><td class=num>{}%</td></tr>'.format(
-        lbl, F(g), CH(chg), F(pr), round(pct_p, 1), F(ct), round(pct_c, 1))
+def KC(label, color, gsv, profit, cost, chg=0):
+    pct_p = (profit/gsv*100) if gsv else 0
+    pct_c = (cost/gsv*100) if gsv else 0
+    return '<div class="kpi-card {}"><div class="kpi-label">{} (GSV)</div><div class="kpi-value">{}</div><div class="kpi-chg">{}</div></div>'.format(color, label, F(gsv), CH(chg)) + \
+           '<div class="kpi-card {}"><div class="kpi-label">{} (利润额)</div><div class="kpi-value">{}</div></div>'.format(color, label, F(profit)) + \
+           '<div class="kpi-card {}"><div class="kpi-label">{} (利润率)</div><div class="kpi-value">{}%</div></div>'.format(color, label, round(pct_p, 1)) + \
+           '<div class="kpi-card {}"><div class="kpi-label">{} (推广总额)</div><div class="kpi-value">{}</div></div>'.format(color, label, F(cost)) + \
+           '<div class="kpi-card {}"><div class="kpi-label">{} (推广占比)</div><div class="kpi-value">{}%</div></div>'.format(color, label, round(pct_c, 1))
 
-tm_tbl = '<table class=kt><thead><tr><th></th><th>GSV</th><th>利润额</th><th>利润率</th><th>推广总额</th><th>推广占比</th></tr></thead><tbody>'
-tm_tbl += KR('当月', tg, tp, tpp, tc, tcp, 0)
-tm_tbl += KR('近7天', d7s, d7p, d7p/d7s*100 if d7s else 0, d7c, d7c/d7s*100 if d7s else 0)
-tm_tbl += KR('昨日', ys, yp, yp/ys*100 if ys else 0, yc, yc/ys*100 if ys else 0)
-tm_tbl += '</tbody></table>'
+tm_tbl = '<div class="section-title">当月</div><div class="kpi-row">' + KC('当月', 'purple', tg, tp, tc) + '</div>'
+tm_tbl += '<div class="section-title">近7天 ({}~{})</div><div class="kpi-row">'.format(today - timedelta(days=7), yesterday) + KC('近7天', 'green', d7s, d7p, d7_cost) + '</div>'
+tm_tbl += '<div class="section-title">昨日 ({})</div><div class="kpi-row">'.format(yesterday) + KC('昨日', 'blue', ys, yp, yd_cost) + '</div>'
 
 # ---- charts ----
 cc = CJ(cd.tail(30), '总销售额', '近30天总销售额趋势')
@@ -156,8 +209,8 @@ if d7f is not None and not d7f.empty and len(tdc) > 1:
     if len(tdc) > 4:
         tr7.append(dict(x=d7t[tdc[0]].astype(str).tolist(), y=d7t[tdc[4]].fillna(0).round(0).tolist(),
             type='scatter', mode='lines+markers', name='毛利', line=dict(width=2, color='#38ef7d'), marker=dict(size=5)))
-    c7d = json.dumps(dict(data=tr7, layout=dict(title='近7天销售额&毛利趋势', height=300,
-        margin=dict(l=50, r=20, t=40, b=30), template='plotly_white', hovermode='x unified')))
+    c7d = json.dumps(dict(data=tr7, layout=dict(title=dict(text='近7天销售额&毛利趋势', font=dict(size=14)),
+        height=340, margin=dict(l=50, r=20, t=50, b=30), template='plotly_white', hovermode='x unified')))
 
 cmth = '{}'
 if not df_tm.empty and len(tdc) > 1:
@@ -167,7 +220,7 @@ if not df_tm.empty and len(tdc) > 1:
     cmth = json.dumps(dict(data=[
         dict(x=ms.index.tolist(), y=ms.values.round(0).tolist(), type='bar', name='GSV', marker=dict(color='#667eea')),
         dict(x=mm.index.tolist(), y=mm.values.round(0).tolist(), type='bar', name='毛利', marker=dict(color='#38ef7d'))],
-        layout=dict(title='近6个月GSV与毛利对比', height=320, barmode='group',
+        layout=dict(title=dict(text='近6个月GSV与毛利对比', font=dict(size=14)), height=340, barmode='group',
         margin=dict(l=50, r=20, t=40, b=30), template='plotly_white', legend=dict(orientation='h', y=1.15))))
 
 # ---- products ----
@@ -197,6 +250,21 @@ if not alr:
 
 print('Building HTML...')
 
+# ---- Build product table now (helpers available) ----
+if tm_prod_html is None:
+    tm_prod_html = '<p style=color:#999>暂无单品数据</p>'
+    if tm_products:
+        rows = ''
+        for p in tm_products:
+            mp = (p['margin']/p['gsv']*100) if p['gsv'] else 0
+            chg = (p['gsv']/p['gsv_prev']-1)*100 if p['gsv_prev'] else 0
+            rows += '<tr style=background:#f8f9fc;font-weight:600><td>{} ({}链接)</td><td class=num>{}</td><td class=num>{}%</td><td class=num>{}</td><td class=num>{}</td><td class=num>{}</td><td class=num>{}<br><span class=sc>{}</span></td></tr>'.format(
+                p['name'], p['links'], F(p['gsv']), round(mp,1), F(p['margin']), int(p['qty']), F(p['cost']), F(p['gsv_prev']), CH(chg))
+            for l in p['detail']:
+                rows += '<tr><td style=padding-left:24px;font-size:12px;color:#888>{}...</td><td class=num>{}</td><td class=num>{}%</td><td class=num>{}</td><td class=num>{}</td><td class=num>{}</td><td class=num>{}</td></tr>'.format(
+                    l['link'][:10], F(l['gsv_j']), round(l['margin_j']/l['gsv_j']*100,1) if l['gsv_j'] else 0, F(l['margin_j']), int(l['qty_j']), F(l['cost_j']), F(l['gsv_m']))
+        tm_prod_html = '<table><thead><tr><th>产品</th><th>GSV(6月)</th><th>毛利率</th><th>毛利</th><th>销量</th><th>成本</th><th>GSV(5月)</th></tr></thead><tbody>' + rows + '</tbody></table>'
+
 # ---- store detail table ----
 def SD(tag):
     i = pk.get(tag, {})
@@ -222,7 +290,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .sidebar .tab:hover{background:rgba(255,255,255,.05);color:#fff}
 .sidebar .tab.active{background:rgba(255,255,255,.1);color:#fff;border-left-color:#667eea;font-weight:600}
 .sidebar .info{margin-top:auto;padding:20px;font-size:11px;color:rgba(255,255,255,.4)}
-.main{flex:1;overflow-y:auto;padding:24px;max-width:1200px}
+.main{flex:1;overflow-y:auto;padding:24px}
 .kpi-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px}
 .kpi-card{flex:1;min-width:180px;border-radius:12px;padding:18px;color:#fff}
 .kpi-card.purple{background:linear-gradient(135deg,#667eea,#764ba2)}
@@ -299,7 +367,7 @@ td{padding:10px 14px;font-size:13px;border-bottom:1px solid #f0f0f0}
         <div class="chart-row"><div class="chart-box"><div id="chart_7d"></div></div><div class="chart-box"><div id="chart_mth"></div></div></div>
         <div class="chart-row"><div class="chart-box"><div id="chart_tmall"></div></div><div class="chart-box">''' + SD('TM') + '''</div></div>
         </div>
-        <div id="tmall-product" style="display:none"><p style="color:#999;">单品数据加载中...</p></div>
+        <div id="tmall-product" style="display:none">''' + tm_prod_html + '''</div>
     </div>
     <div id="tab-douyin" class="tab-content">
         <div class="section-title">&#x1f3b5; 抖音平台 (三店合并)</div>
